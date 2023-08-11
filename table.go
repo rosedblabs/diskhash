@@ -3,6 +3,7 @@ package diskhash
 import (
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -18,27 +19,34 @@ const (
 	bucketSize     = 512
 )
 
-type MatchKeyFunc func(*Slot) (bool, error)
+type MatchKeyFunc func(Slot) (bool, error)
 
 type Table struct {
-	mainFile         fs.File
-	overflowFile     fs.File
-	mu               *sync.RWMutex
-	level            uint8
-	splitBucketIndex uint32
-	numBuckets       uint32
+	mainFile     fs.File
+	overflowFile fs.File
+	mu           *sync.RWMutex
+	options      Options
+	meta         *tableMeta
 }
 
 type tableMeta struct {
-	splitBucketIndex int
-	numBuckets       int
+	Level            uint8
+	SplitBucketIndex uint32
+	NumBuckets       uint32
+	NumKeys          uint32
 }
 
 func Open(options Options) (*Table, error) {
 	t := &Table{
-		mu:               new(sync.RWMutex),
-		level:            0,
-		splitBucketIndex: 0,
+		mu:      new(sync.RWMutex),
+		options: options,
+	}
+
+	// create data directory if not exist
+	if _, err := os.Stat(options.DirPath); err != nil {
+		if err := os.MkdirAll(options.DirPath, os.ModePerm); err != nil {
+			return nil, err
+		}
 	}
 
 	// open and init main file
@@ -50,8 +58,9 @@ func Open(options Options) (*Table, error) {
 	if mainFile.Size() == fileHeaderSize {
 		if err := mainFile.Truncate(bucketSize); err != nil {
 			_ = mainFile.Close()
+			return nil, err
 		}
-	} else if err = t.readMetadata(); err != nil {
+	} else if err = t.readMeta(); err != nil {
 		return nil, err
 	}
 	t.mainFile = mainFile
@@ -69,20 +78,32 @@ func Open(options Options) (*Table, error) {
 func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	keyHash := getKeyHash(key)
 	slot := &Slot{Hash: keyHash, Value: value}
-	insertionBucket, err := t.getInsertionBucket(slot, matchKey)
+	insertionBucket, err := t.getInsertionBucket(slot.Hash, matchKey)
 	if err != nil {
 		return err
 	}
 	insertionBucket.newSlot = slot
 
-	// write
+	// write the new slot to the bucket
+	if err := insertionBucket.writeSlot(); err != nil {
+		return err
+	}
+	t.meta.NumKeys++
+
+	ratio := float64(t.meta.NumKeys) / float64(t.meta.NumBuckets*slotsPerBucket)
+	// expand if necessary
+	if ratio > t.options.LoadFactor {
+		if err := t.expand(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func (t *Table) getInsertionBucket(newSlot *Slot, matchKey MatchKeyFunc) (*bucket, error) {
-	bucketIterator := t.newBucketIterator(t.getKeyBucket(newSlot.Hash))
+func (t *Table) getInsertionBucket(keyHash uint32, matchKey MatchKeyFunc) (*bucket, error) {
+	bucketIterator := t.newBucketIterator(t.getKeyBucket(keyHash))
 	for {
-		bucket, err := bucketIterator.next()
+		b, err := bucketIterator.next()
 		if err == io.EOF {
 			return nil, errors.New("failed to put new slot")
 		}
@@ -90,26 +111,37 @@ func (t *Table) getInsertionBucket(newSlot *Slot, matchKey MatchKeyFunc) (*bucke
 			return nil, err
 		}
 
-		for i, slot := range bucket.slots {
+		// iterate all slots in the bucket, find the slot to insert
+		for i, slot := range b.slots {
 			// find an empty slot to insert
 			if slot.Hash == 0 {
-				bucket.newSlotIndex = i
-				return bucket, nil
+				b.newSlotIndex = i
+				return b, nil
 			}
-			if slot.Hash != newSlot.Hash {
+			if slot.Hash != keyHash {
 				continue
 			}
 			match, err := matchKey(slot)
 			if err != nil {
-				return bucket, err
+				return nil, err
 			}
 			if match {
-				bucket.newSlotIndex = i
+				b.newSlotIndex = i
+				return b, nil
 			}
 		}
-		if bucket.overflowOff == 0 {
-			bucket.newSlotIndex = slotsPerBucket
-			return bucket, nil
+
+		if b.nextOffset == 0 {
+			offset := t.overflowFile.Size()
+			if err := t.overflowFile.Truncate(bucketSize); err != nil {
+				return nil, err
+			}
+			overflowBucket := &bucket{
+				file:         t.overflowFile,
+				newSlotIndex: 0,
+				offset:       offset,
+			}
+			return overflowBucket, nil
 		}
 	}
 }
@@ -129,19 +161,19 @@ func getKeyHash(key []byte) uint32 {
 
 // get the bucket according to the key
 func (t *Table) getKeyBucket(keyHash uint32) uint32 {
-	b := keyHash & ((1 << t.level) - 1)
-	if b < t.splitBucketIndex {
-		return keyHash & ((1 << (t.level + 1)) - 1)
+	b := keyHash & ((1 << t.meta.Level) - 1)
+	if b < t.meta.SplitBucketIndex {
+		return keyHash & ((1 << (t.meta.Level + 1)) - 1)
 	}
 	return b
 }
 
-func (t *Table) readMetadata() error {
+func (t *Table) readMeta() error {
 	return nil
 }
 
 func openFile(name string) (fs.File, error) {
-	file, err := fs.Open(name)
+	file, err := fs.Open(name, fs.OSFileSystem)
 	if err != nil {
 		return nil, err
 	}
@@ -152,4 +184,8 @@ func openFile(name string) (fs.File, error) {
 		}
 	}
 	return file, nil
+}
+
+func (t *Table) expand() error {
+	return nil
 }

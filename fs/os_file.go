@@ -6,26 +6,24 @@ type OSFile struct {
 	fd *os.File
 }
 
-func openOSFile(name string, flag int, perm os.FileMode) (File, error) {
-	fd, err := os.OpenFile(name, flag, perm)
+func openOSFile(name string) (File, error) {
+	fd, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, err
 	}
-	return &OSFile{
-		fd: fd,
-	}, nil
+	return &OSFile{fd: fd}, nil
 }
 
 func (of *OSFile) ReadAt(b []byte, off int64) (n int, err error) {
 	return of.fd.ReadAt(b, off)
 }
 
-func (of *OSFile) Write([]byte) error {
-	return nil
+func (of *OSFile) WriteAt(b []byte, off int64) (n int, err error) {
+	return of.fd.WriteAt(b, off)
 }
 
 func (of *OSFile) Truncate(size int64) error {
-	return nil
+	return of.fd.Truncate(of.Size() + size)
 }
 
 func (of *OSFile) Size() int64 {
