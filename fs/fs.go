@@ -1,12 +1,16 @@
 package fs
 
+import "io"
+
 type File interface {
-	ReadAt([]byte, int64) (int, error)
-	WriteAt([]byte, int64) (int, error)
+	io.Reader
+	io.ReaderAt
+	io.Writer
+	io.WriterAt
+	io.Closer
 	Truncate(int64) error
 	Size() int64
 	Sync() error
-	Close() error
 }
 
 type FileSystem = byte

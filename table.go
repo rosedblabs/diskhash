@@ -1,6 +1,7 @@
 package diskhash
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -54,14 +55,19 @@ func Open(options Options) (*Table, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	meta, err := readMeta(mainFile)
+	if err != nil {
+		return nil, err
+	}
+	t.meta = meta
+
 	// init first bucket
 	if mainFile.Size() == fileHeaderSize {
 		if err := mainFile.Truncate(bucketSize); err != nil {
 			_ = mainFile.Close()
 			return nil, err
 		}
-	} else if err = t.readMeta(); err != nil {
-		return nil, err
 	}
 	t.mainFile = mainFile
 
@@ -75,24 +81,65 @@ func Open(options Options) (*Table, error) {
 	return t, nil
 }
 
+func readMeta(file fs.File) (*tableMeta, error) {
+	var meta *tableMeta
+	if file.Size() == fileHeaderSize {
+		meta = &tableMeta{
+			Level:            0,
+			SplitBucketIndex: 0,
+			NumBuckets:       1,
+			NumKeys:          0,
+		}
+	} else {
+		decoder := json.NewDecoder(file)
+		if err := decoder.Decode(meta); err != nil {
+			return nil, err
+		}
+	}
+	return meta, nil
+}
+
+func (t *Table) writeMeta() error {
+	encoder := json.NewEncoder(t.mainFile)
+	return encoder.Encode(t.meta)
+}
+
+func (t *Table) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := t.writeMeta(); err != nil {
+		return err
+	}
+
+	_ = t.overflowFile.Close()
+	_ = t.mainFile.Close()
+	return nil
+}
+
 func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	keyHash := getKeyHash(key)
 	slot := &Slot{Hash: keyHash, Value: value}
-	insertionBucket, err := t.getInsertionBucket(slot.Hash, matchKey)
+	sw, err := t.getSlotWriter(slot.Hash, matchKey)
 	if err != nil {
 		return err
 	}
-	insertionBucket.newSlot = slot
 
 	// write the new slot to the bucket
-	if err := insertionBucket.writeSlot(); err != nil {
+	if err = sw.insertSlot(*slot, t); err != nil {
+		return err
+	}
+	if err := sw.writeSingleSlot(); err != nil {
 		return err
 	}
 	t.meta.NumKeys++
+	if sw.overwrite {
+		return nil
+	}
 
-	ratio := float64(t.meta.NumKeys) / float64(t.meta.NumBuckets*slotsPerBucket)
+	keyRatio := float64(t.meta.NumKeys) / float64(t.meta.NumBuckets*slotsPerBucket)
 	// expand if necessary
-	if ratio > t.options.LoadFactor {
+	if keyRatio > t.options.LoadFactor {
 		if err := t.expand(); err != nil {
 			return err
 		}
@@ -100,10 +147,11 @@ func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	return nil
 }
 
-func (t *Table) getInsertionBucket(keyHash uint32, matchKey MatchKeyFunc) (*bucket, error) {
-	bucketIterator := t.newBucketIterator(t.getKeyBucket(keyHash))
+func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWriter, error) {
+	sw := &slotWriter{}
+	bi := t.newBucketIterator(t.getKeyBucket(keyHash))
 	for {
-		b, err := bucketIterator.next()
+		b, err := bi.next()
 		if err == io.EOF {
 			return nil, errors.New("failed to put new slot")
 		}
@@ -111,12 +159,13 @@ func (t *Table) getInsertionBucket(keyHash uint32, matchKey MatchKeyFunc) (*buck
 			return nil, err
 		}
 
+		sw.currentBucket = b
 		// iterate all slots in the bucket, find the slot to insert
 		for i, slot := range b.slots {
 			// find an empty slot to insert
 			if slot.Hash == 0 {
-				b.newSlotIndex = i
-				return b, nil
+				sw.currentSlotIndex = i
+				return sw, nil
 			}
 			if slot.Hash != keyHash {
 				continue
@@ -126,22 +175,13 @@ func (t *Table) getInsertionBucket(keyHash uint32, matchKey MatchKeyFunc) (*buck
 				return nil, err
 			}
 			if match {
-				b.newSlotIndex = i
-				return b, nil
+				sw.currentSlotIndex, sw.overwrite = i, true
+				return sw, nil
 			}
 		}
-
 		if b.nextOffset == 0 {
-			offset := t.overflowFile.Size()
-			if err := t.overflowFile.Truncate(bucketSize); err != nil {
-				return nil, err
-			}
-			overflowBucket := &bucket{
-				file:         t.overflowFile,
-				newSlotIndex: 0,
-				offset:       offset,
-			}
-			return overflowBucket, nil
+			sw.currentSlotIndex = slotsPerBucket
+			return sw, nil
 		}
 	}
 }
@@ -168,15 +208,12 @@ func (t *Table) getKeyBucket(keyHash uint32) uint32 {
 	return b
 }
 
-func (t *Table) readMeta() error {
-	return nil
-}
-
 func openFile(name string) (fs.File, error) {
 	file, err := fs.Open(name, fs.OSFileSystem)
 	if err != nil {
 		return nil, err
 	}
+	// init file header
 	if file.Size() == 0 {
 		if err := file.Truncate(fileHeaderSize); err != nil {
 			_ = file.Close()
@@ -187,5 +224,64 @@ func openFile(name string) (fs.File, error) {
 }
 
 func (t *Table) expand() error {
+	updatedBucketIndex := t.meta.SplitBucketIndex
+	updatedSlotWriter := &slotWriter{
+		currentBucket: &bucket{
+			file:   t.mainFile,
+			offset: bucketOffset(updatedBucketIndex),
+		},
+	}
+
+	newSlotWriter := &slotWriter{
+		currentBucket: &bucket{
+			file:   t.mainFile,
+			offset: t.mainFile.Size(),
+		},
+	}
+
+	if err := t.mainFile.Truncate(bucketSize); err != nil {
+		return err
+	}
+
+	t.meta.SplitBucketIndex++
+	if t.meta.SplitBucketIndex == 1<<t.meta.Level {
+		t.meta.Level++
+		t.meta.SplitBucketIndex = 0
+	}
+
+	bi := t.newBucketIterator(updatedBucketIndex)
+	for {
+		b, err := bi.next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		for _, slot := range b.slots {
+			var insertErr error
+			if t.getKeyBucket(slot.Hash) == updatedBucketIndex {
+				insertErr = updatedSlotWriter.insertSlot(slot, t)
+			} else {
+				insertErr = newSlotWriter.insertSlot(slot, t)
+			}
+			if insertErr != nil {
+				return insertErr
+			}
+		}
+	}
+
+	if err := updatedSlotWriter.writeSlots(); err != nil {
+		return err
+	}
+	if err := newSlotWriter.writeSlots(); err != nil {
+		return err
+	}
+
+	t.meta.NumBuckets++
 	return nil
+}
+
+func (t *Table) createOverflowBucket() (*bucket, error) {
+	return nil, nil
 }

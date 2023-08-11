@@ -14,8 +14,16 @@ func openOSFile(name string) (File, error) {
 	return &OSFile{fd: fd}, nil
 }
 
+func (of *OSFile) Read(p []byte) (n int, err error) {
+	return of.fd.Read(p)
+}
+
 func (of *OSFile) ReadAt(b []byte, off int64) (n int, err error) {
 	return of.fd.ReadAt(b, off)
+}
+
+func (of *OSFile) Write(p []byte) (n int, err error) {
+	return of.fd.Write(p)
 }
 
 func (of *OSFile) WriteAt(b []byte, off int64) (n int, err error) {

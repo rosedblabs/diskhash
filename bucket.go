@@ -9,20 +9,11 @@ import (
 
 const slotsPerBucket = 31
 
-type Slot struct {
-	Hash  uint32
-	Value []byte
-}
-
 type bucket struct {
 	slots      [slotsPerBucket]Slot
+	offset     int64
 	nextOffset int64
-
-	// fields used by write slot
-	offset       int64
-	file         fs.File
-	newSlot      *Slot
-	newSlotIndex int
+	file       fs.File
 }
 
 type bucketIterator struct {
@@ -30,6 +21,18 @@ type bucketIterator struct {
 	overflowFile fs.File
 	offset       int64
 	slotValueLen uint32
+}
+
+type Slot struct {
+	Hash  uint32
+	Value []byte
+}
+
+type slotWriter struct {
+	currentBucket    *bucket
+	currentSlotIndex int
+	prevBuckets      []*bucket
+	overwrite        bool
 }
 
 func bucketOffset(bucketIndex uint32) int64 {
@@ -85,14 +88,62 @@ func (bi *bucketIterator) readBucket() (*bucket, error) {
 	return b, nil
 }
 
-func (b *bucket) writeSlot() error {
-	slotLen := 4 + len(b.newSlot.Value)
-	buf := make([]byte, slotLen)
-	binary.LittleEndian.PutUint32(buf[:4], b.newSlot.Hash)
-	copy(buf[4:], b.newSlot.Value)
+func (sw *slotWriter) insertSlot(sl Slot, t *Table) error {
+	if sw.currentSlotIndex == slotsPerBucket {
+		nextBucket, err := t.createOverflowBucket()
+		if err != nil {
+			return err
+		}
+		sw.currentBucket.nextOffset = nextBucket.offset
+		sw.prevBuckets = append(sw.prevBuckets, sw.currentBucket)
+		sw.currentBucket = nextBucket
+		sw.currentSlotIndex = 0
+	}
+	sw.currentBucket.slots[sw.currentSlotIndex] = sl
+	sw.currentSlotIndex++
+	return nil
+}
 
-	writeOff := b.offset + int64((b.newSlotIndex)*slotLen)
-	_, err := b.file.WriteAt(buf, writeOff)
+func (sw *slotWriter) writeSlots() error {
+	for i := len(sw.prevBuckets) - 1; i >= 0; i-- {
+		if err := sw.prevBuckets[i].write(); err != nil {
+			return err
+		}
+	}
+	return sw.currentBucket.write()
+}
 
+func (sw *slotWriter) writeSingleSlot() error {
+	if len(sw.prevBuckets) > 0 {
+		writeOff := sw.prevBuckets[0].offset + bucketSize - 8
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, uint64(sw.prevBuckets[0].nextOffset))
+		_, err := sw.prevBuckets[0].file.WriteAt(buf, writeOff)
+		if err != nil {
+			return err
+		}
+	}
+
+	slot := sw.currentBucket.slots[sw.currentSlotIndex-1]
+	buf := make([]byte, len(slot.Value)+4)
+	binary.LittleEndian.PutUint32(buf[:4], slot.Hash)
+	copy(buf[4:], slot.Value)
+	_, err := sw.currentBucket.file.WriteAt(buf, sw.currentBucket.offset)
+
+	return err
+}
+
+func (b *bucket) write() error {
+	buf := make([]byte, bucketSize)
+	data := buf
+	for i := 0; i < slotsPerBucket; i++ {
+		slot := b.slots[i]
+		binary.LittleEndian.PutUint32(buf[:4], slot.Hash)
+		copy(buf[4:4+len(slot.Value)], slot.Value)
+		buf = buf[4+len(slot.Value):]
+	}
+	binary.LittleEndian.PutUint64(buf[:8], uint64(b.nextOffset))
+
+	_, err := b.file.WriteAt(data, b.offset)
 	return err
 }

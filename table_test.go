@@ -3,11 +3,12 @@ package diskhash
 import "testing"
 
 func TestOpen(t *testing.T) {
-	options := Options{DirPath: "/tmp/disk-hash", SlotValueLength: 8}
+	options := Options{DirPath: "/tmp/disk-hash", SlotValueLength: 8, LoadFactor: 0.7}
 	table, err := Open(options)
 	if err != nil {
 		t.Error(err)
 	}
+	defer table.Close()
 
 	t.Log(table)
 
