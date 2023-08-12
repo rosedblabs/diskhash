@@ -1,33 +1,32 @@
 package diskhash
 
 import (
-	"encoding/json"
+	"encoding/gob"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
 
-	"github.com/lotusdblabs/diskhash/fs"
+	"github.com/rosedblabs/diskhash/fs"
 	"github.com/spaolacci/murmur3"
 )
 
 const (
-	mainFileName     = "INDEX.MAIN"
-	overflowFileName = "INDEX.OVERFLOW"
-
-	fileHeaderSize = 512
-	bucketSize     = 512
+	primaryFileName  = "HASH.PRIMARY"
+	overflowFileName = "HASH.OVERFLOW"
+	metaFileName     = "HASH.META"
 )
 
 type MatchKeyFunc func(Slot) (bool, error)
 
 type Table struct {
-	mainFile     fs.File
+	primaryFile  fs.File
 	overflowFile fs.File
+	metaFile     fs.File
+	meta         *tableMeta
 	mu           *sync.RWMutex
 	options      Options
-	meta         *tableMeta
 }
 
 type tableMeta struct {
@@ -35,6 +34,9 @@ type tableMeta struct {
 	SplitBucketIndex uint32
 	NumBuckets       uint32
 	NumKeys          uint32
+	SlotValueLength  uint32
+	BucketSize       uint32
+	FreeBuckets      []int64
 }
 
 func Open(options Options) (*Table, error) {
@@ -50,29 +52,27 @@ func Open(options Options) (*Table, error) {
 		}
 	}
 
-	// open and init main file
-	mainFile, err := openFile(filepath.Join(options.DirPath, mainFileName))
-	if err != nil {
+	// open and read metadata info
+	if err := t.readMeta(); err != nil {
 		return nil, err
 	}
 
-	meta, err := readMeta(mainFile)
+	// open and init primary file
+	primaryFile, err := openFile(filepath.Join(options.DirPath, primaryFileName), t.meta.BucketSize)
 	if err != nil {
 		return nil, err
 	}
-	t.meta = meta
-
 	// init first bucket
-	if mainFile.Size() == fileHeaderSize {
-		if err := mainFile.Truncate(bucketSize); err != nil {
-			_ = mainFile.Close()
+	if primaryFile.Size() == int64(t.meta.BucketSize) {
+		if err := primaryFile.Truncate(int64(t.meta.BucketSize)); err != nil {
+			_ = primaryFile.Close()
 			return nil, err
 		}
 	}
-	t.mainFile = mainFile
+	t.primaryFile = primaryFile
 
 	// open overflow file
-	overflowFile, err := openFile(filepath.Join(options.DirPath, overflowFileName))
+	overflowFile, err := openFile(filepath.Join(options.DirPath, overflowFileName), t.meta.BucketSize)
 	if err != nil {
 		return nil, err
 	}
@@ -81,26 +81,34 @@ func Open(options Options) (*Table, error) {
 	return t, nil
 }
 
-func readMeta(file fs.File) (*tableMeta, error) {
-	var meta *tableMeta
-	if file.Size() == fileHeaderSize {
-		meta = &tableMeta{
-			Level:            0,
-			SplitBucketIndex: 0,
-			NumBuckets:       1,
-			NumKeys:          0,
+func (t *Table) readMeta() error {
+	// init meta file if not exist
+	if t.metaFile == nil {
+		file, err := fs.Open(filepath.Join(t.options.DirPath, metaFileName), fs.OSFileSystem)
+		if err != nil {
+			return err
 		}
+		t.meta = &tableMeta{
+			NumBuckets:      1,
+			SlotValueLength: t.options.SlotValueLength,
+		}
+		t.meta.BucketSize = slotsPerBucket*(4+t.meta.SlotValueLength) + 8
+		t.metaFile = file
 	} else {
-		decoder := json.NewDecoder(file)
-		if err := decoder.Decode(meta); err != nil {
-			return nil, err
+		decoder := gob.NewDecoder(t.metaFile)
+		if err := decoder.Decode(t.meta); err != nil {
+			return err
+		}
+		if t.meta.SlotValueLength != t.options.SlotValueLength {
+			return errors.New("slot value length mismatch")
 		}
 	}
-	return meta, nil
+
+	return nil
 }
 
 func (t *Table) writeMeta() error {
-	encoder := json.NewEncoder(t.mainFile)
+	encoder := gob.NewEncoder(t.metaFile)
 	return encoder.Encode(t.meta)
 }
 
@@ -112,12 +120,25 @@ func (t *Table) Close() error {
 		return err
 	}
 
+	_ = t.primaryFile.Close()
 	_ = t.overflowFile.Close()
-	_ = t.mainFile.Close()
+	_ = t.metaFile.Close()
 	return nil
 }
 
 func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	// the value length must be equal to the length specified in the options
+	if len(value) != int(t.meta.SlotValueLength) {
+		return errors.New("invalid slot value length")
+	}
+
+	// get the slot writer to write the new slot,
+	// it will get the corresponding bucket according to the key hash,
+	// and find an empty slot to insert.
+	// If there are no empty slots, a overflow bucket will be created.
 	keyHash := getKeyHash(key)
 	slot := &Slot{Hash: keyHash, Value: value}
 	sw, err := t.getSlotWriter(slot.Hash, matchKey)
@@ -129,18 +150,20 @@ func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	if err = sw.insertSlot(*slot, t); err != nil {
 		return err
 	}
-	if err := sw.writeSingleSlot(); err != nil {
+	if err := sw.writeSlots(); err != nil {
 		return err
 	}
-	t.meta.NumKeys++
+	// if the slot already exists, no need to update meta
+	// because the number of keys has not changed
 	if sw.overwrite {
 		return nil
 	}
 
+	t.meta.NumKeys++
+	// split if the load factor is exceeded
 	keyRatio := float64(t.meta.NumKeys) / float64(t.meta.NumBuckets*slotsPerBucket)
-	// expand if necessary
 	if keyRatio > t.options.LoadFactor {
-		if err := t.expand(); err != nil {
+		if err := t.split(); err != nil {
 			return err
 		}
 	}
@@ -150,6 +173,8 @@ func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWriter, error) {
 	sw := &slotWriter{}
 	bi := t.newBucketIterator(t.getKeyBucket(keyHash))
+	// iterate all slots in the bucket and the overflow buckets,
+	// find the slot to insert.
 	for {
 		b, err := bi.next()
 		if err == io.EOF {
@@ -160,7 +185,7 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 		}
 
 		sw.currentBucket = b
-		// iterate all slots in the bucket, find the slot to insert
+		// iterate all slots in the bucket, find the existing or empty slot
 		for i, slot := range b.slots {
 			// find an empty slot to insert
 			if slot.Hash == 0 {
@@ -174,11 +199,13 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 			if err != nil {
 				return nil, err
 			}
+			// key already exists, overwrite the value
 			if match {
 				sw.currentSlotIndex, sw.overwrite = i, true
 				return sw, nil
 			}
 		}
+		// no empty slot in the bucket, will create an overflow bucket
 		if b.nextOffset == 0 {
 			sw.currentSlotIndex = slotsPerBucket
 			return sw, nil
@@ -186,8 +213,36 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 	}
 }
 
-func (t *Table) Get() error {
-	return nil
+func (t *Table) Get(key []byte, matchKey MatchKeyFunc) error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	// get the bucket according to the key hash
+	keyHash := getKeyHash(key)
+	startBucket := t.getKeyBucket(keyHash)
+	bi := t.newBucketIterator(startBucket)
+	// iterate all slots in the bucket and the overflow buckets,
+	// find the slot to get.
+	for {
+		b, err := bi.next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for _, slot := range b.slots {
+			if slot.Hash == 0 {
+				break
+			}
+			if slot.Hash != keyHash {
+				continue
+			}
+			if match, err := matchKey(slot); match || err != nil {
+				return err
+			}
+		}
+	}
 }
 
 func (t *Table) Delete() error {
@@ -201,21 +256,21 @@ func getKeyHash(key []byte) uint32 {
 
 // get the bucket according to the key
 func (t *Table) getKeyBucket(keyHash uint32) uint32 {
-	b := keyHash & ((1 << t.meta.Level) - 1)
-	if b < t.meta.SplitBucketIndex {
+	bucketIndex := keyHash & ((1 << t.meta.Level) - 1)
+	if bucketIndex < t.meta.SplitBucketIndex {
 		return keyHash & ((1 << (t.meta.Level + 1)) - 1)
 	}
-	return b
+	return bucketIndex
 }
 
-func openFile(name string) (fs.File, error) {
+func openFile(name string, bucketSize uint32) (fs.File, error) {
 	file, err := fs.Open(name, fs.OSFileSystem)
 	if err != nil {
 		return nil, err
 	}
 	// init file header
 	if file.Size() == 0 {
-		if err := file.Truncate(fileHeaderSize); err != nil {
+		if err := file.Truncate(int64(bucketSize)); err != nil {
 			_ = file.Close()
 			return nil, err
 		}
@@ -223,23 +278,24 @@ func openFile(name string) (fs.File, error) {
 	return file, nil
 }
 
-func (t *Table) expand() error {
-	updatedBucketIndex := t.meta.SplitBucketIndex
-	updatedSlotWriter := &slotWriter{
+func (t *Table) split() error {
+	splitBucketIndex := t.meta.SplitBucketIndex
+	splitSlotWriter := &slotWriter{
 		currentBucket: &bucket{
-			file:   t.mainFile,
-			offset: bucketOffset(updatedBucketIndex),
+			file:       t.primaryFile,
+			offset:     t.bucketOffset(splitBucketIndex),
+			bucketSize: t.meta.BucketSize,
 		},
 	}
 
 	newSlotWriter := &slotWriter{
 		currentBucket: &bucket{
-			file:   t.mainFile,
-			offset: t.mainFile.Size(),
+			file:       t.primaryFile,
+			offset:     t.primaryFile.Size(),
+			bucketSize: t.meta.BucketSize,
 		},
 	}
-
-	if err := t.mainFile.Truncate(bucketSize); err != nil {
+	if err := t.primaryFile.Truncate(int64(t.meta.BucketSize)); err != nil {
 		return err
 	}
 
@@ -249,7 +305,8 @@ func (t *Table) expand() error {
 		t.meta.SplitBucketIndex = 0
 	}
 
-	bi := t.newBucketIterator(updatedBucketIndex)
+	var freeBuckets []int64
+	bi := t.newBucketIterator(splitBucketIndex)
 	for {
 		b, err := bi.next()
 		if err == io.EOF {
@@ -259,9 +316,12 @@ func (t *Table) expand() error {
 			return err
 		}
 		for _, slot := range b.slots {
+			if slot.Hash == 0 {
+				break
+			}
 			var insertErr error
-			if t.getKeyBucket(slot.Hash) == updatedBucketIndex {
-				insertErr = updatedSlotWriter.insertSlot(slot, t)
+			if t.getKeyBucket(slot.Hash) == splitBucketIndex {
+				insertErr = splitSlotWriter.insertSlot(slot, t)
 			} else {
 				insertErr = newSlotWriter.insertSlot(slot, t)
 			}
@@ -269,9 +329,17 @@ func (t *Table) expand() error {
 				return insertErr
 			}
 		}
+		if b.nextOffset != 0 {
+			freeBuckets = append(freeBuckets, b.nextOffset)
+		}
 	}
 
-	if err := updatedSlotWriter.writeSlots(); err != nil {
+	// collect the free buckets
+	if len(freeBuckets) > 0 {
+		t.meta.FreeBuckets = append(t.meta.FreeBuckets, freeBuckets...)
+	}
+
+	if err := splitSlotWriter.writeSlots(); err != nil {
 		return err
 	}
 	if err := newSlotWriter.writeSlots(); err != nil {
@@ -283,5 +351,20 @@ func (t *Table) expand() error {
 }
 
 func (t *Table) createOverflowBucket() (*bucket, error) {
-	return nil, nil
+	var offset int64
+	if len(t.meta.FreeBuckets) > 0 {
+		offset = t.meta.FreeBuckets[0]
+		t.meta.FreeBuckets = t.meta.FreeBuckets[1:]
+	} else {
+		offset = t.overflowFile.Size()
+		err := t.overflowFile.Truncate(int64(t.meta.BucketSize))
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &bucket{
+		file:       t.overflowFile,
+		offset:     offset,
+		bucketSize: t.meta.BucketSize,
+	}, nil
 }

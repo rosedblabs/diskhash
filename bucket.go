@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 
-	"github.com/lotusdblabs/diskhash/fs"
+	"github.com/rosedblabs/diskhash/fs"
 )
 
 const slotsPerBucket = 31
@@ -14,13 +14,16 @@ type bucket struct {
 	offset     int64
 	nextOffset int64
 	file       fs.File
+	bucketSize uint32
 }
 
 type bucketIterator struct {
 	currentFile  fs.File
 	overflowFile fs.File
 	offset       int64
+
 	slotValueLen uint32
+	bucketSize   uint32
 }
 
 type Slot struct {
@@ -35,21 +38,22 @@ type slotWriter struct {
 	overwrite        bool
 }
 
-func bucketOffset(bucketIndex uint32) int64 {
-	return int64(fileHeaderSize) + int64(bucketSize*bucketIndex)
+func (t *Table) bucketOffset(bucketIndex uint32) int64 {
+	return int64((bucketIndex + 1) * t.meta.BucketSize)
 }
 
 func (t *Table) newBucketIterator(startBucket uint32) *bucketIterator {
 	return &bucketIterator{
-		currentFile:  t.mainFile,
+		currentFile:  t.primaryFile,
 		overflowFile: t.overflowFile,
-		offset:       bucketOffset(startBucket),
+		offset:       t.bucketOffset(startBucket),
 		slotValueLen: t.options.SlotValueLength,
+		bucketSize:   t.meta.BucketSize,
 	}
 }
 
 func (bi *bucketIterator) next() (*bucket, error) {
-	//  got the end of iteration
+	// end of iteration
 	if bi.offset == 0 {
 		return nil, io.EOF
 	}
@@ -60,35 +64,40 @@ func (bi *bucketIterator) next() (*bucket, error) {
 		return nil, err
 	}
 
-	// move to next bucket
+	// move to next overflow bucket
 	bi.offset = bucket.nextOffset
 	bi.currentFile = bi.overflowFile
 	return bucket, nil
 }
 
 func (bi *bucketIterator) readBucket() (*bucket, error) {
-	bucketBuf := make([]byte, bucketSize)
+	bucketBuf := make([]byte, bi.bucketSize)
 	if _, err := bi.currentFile.ReadAt(bucketBuf, bi.offset); err != nil {
 		return nil, err
 	}
 
-	b := &bucket{file: bi.currentFile, offset: bi.offset}
+	b := &bucket{file: bi.currentFile, offset: bi.offset, bucketSize: bi.bucketSize}
 	// parse and get slots in the bucket
 	for i := 0; i < slotsPerBucket; i++ {
 		_ = bucketBuf[4+bi.slotValueLen]
 		b.slots[i].Hash = binary.LittleEndian.Uint32(bucketBuf[:4])
 		if b.slots[i].Hash != 0 {
-			b.slots[i].Value = bucketBuf[4 : 4+bi.slotValueLen]
+			// b.slots[i].Value = bucketBuf[4 : 4+bi.slotValueLen]
+			b.slots[i].Value = make([]byte, bi.slotValueLen)
+			copy(b.slots[i].Value, bucketBuf[4:4+bi.slotValueLen])
 		}
 		bucketBuf = bucketBuf[4+bi.slotValueLen:]
 	}
-	// the last 8 bytes is the offset of next bucket
+
+	// the last 8 bytes is the offset of next overflow bucket
 	b.nextOffset = int64(binary.LittleEndian.Uint64(bucketBuf[:8]))
 
 	return b, nil
 }
 
 func (sw *slotWriter) insertSlot(sl Slot, t *Table) error {
+	// if we exeed the slotsPerBucket, we need to create a new overflow bucket
+	// and link it to the current bucket
 	if sw.currentSlotIndex == slotsPerBucket {
 		nextBucket, err := t.createOverflowBucket()
 		if err != nil {
@@ -99,6 +108,7 @@ func (sw *slotWriter) insertSlot(sl Slot, t *Table) error {
 		sw.currentBucket = nextBucket
 		sw.currentSlotIndex = 0
 	}
+
 	sw.currentBucket.slots[sw.currentSlotIndex] = sl
 	sw.currentSlotIndex++
 	return nil
@@ -113,28 +123,8 @@ func (sw *slotWriter) writeSlots() error {
 	return sw.currentBucket.write()
 }
 
-func (sw *slotWriter) writeSingleSlot() error {
-	if len(sw.prevBuckets) > 0 {
-		writeOff := sw.prevBuckets[0].offset + bucketSize - 8
-		buf := make([]byte, 8)
-		binary.LittleEndian.PutUint64(buf, uint64(sw.prevBuckets[0].nextOffset))
-		_, err := sw.prevBuckets[0].file.WriteAt(buf, writeOff)
-		if err != nil {
-			return err
-		}
-	}
-
-	slot := sw.currentBucket.slots[sw.currentSlotIndex-1]
-	buf := make([]byte, len(slot.Value)+4)
-	binary.LittleEndian.PutUint32(buf[:4], slot.Hash)
-	copy(buf[4:], slot.Value)
-	_, err := sw.currentBucket.file.WriteAt(buf, sw.currentBucket.offset)
-
-	return err
-}
-
 func (b *bucket) write() error {
-	buf := make([]byte, bucketSize)
+	buf := make([]byte, b.bucketSize)
 	data := buf
 	for i := 0; i < slotsPerBucket; i++ {
 		slot := b.slots[i]
