@@ -10,7 +10,10 @@ you will get the positions to get the data from WAL, the common way to store the
 
 so, you can use diskhash to store the index on disk.
 
-## Can I use it if I am not using WAL?
+## Can be used as a general hash table index(without wal)?
 
 yes, you can use it as an on-disk hash table index, but the restriction is that the value must be fixed size.
 you can set the value size when you create the index, and once you set the value size, you can't change it.
+
+But don't set the value size too large(1KB), the disk size maybe increase dramatically because of the write amplification.
+**it is suitable for storing some metadata of your system.**
