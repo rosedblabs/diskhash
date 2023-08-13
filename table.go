@@ -41,6 +41,10 @@ type tableMeta struct {
 }
 
 func Open(options Options) (*Table, error) {
+	if err := checkOptions(options); err != nil {
+		return nil, err
+	}
+
 	t := &Table{
 		mu:      new(sync.RWMutex),
 		options: options,
@@ -80,6 +84,19 @@ func Open(options Options) (*Table, error) {
 	t.overflowFile = overflowFile
 
 	return t, nil
+}
+
+func checkOptions(options Options) error {
+	if options.DirPath == "" {
+		return errors.New("dir path cannot be empty")
+	}
+	if options.SlotValueLength <= 0 {
+		return errors.New("slot value length must be greater than 0")
+	}
+	if options.LoadFactor < 0 || options.LoadFactor > 1 {
+		return errors.New("load factor must be between 0 and 1")
+	}
+	return nil
 }
 
 func (t *Table) readMeta() error {
