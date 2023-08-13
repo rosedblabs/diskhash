@@ -1,9 +1,13 @@
 package fs
 
-import "os"
+import (
+	"io"
+	"os"
+)
 
 type OSFile struct {
-	fd *os.File
+	fd   *os.File
+	size int64
 }
 
 func openOSFile(name string) (File, error) {
@@ -11,7 +15,13 @@ func openOSFile(name string) (File, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &OSFile{fd: fd}, nil
+
+	// get the file size
+	size, err := fd.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	return &OSFile{fd: fd, size: size}, nil
 }
 
 func (of *OSFile) Read(p []byte) (n int, err error) {
@@ -31,12 +41,16 @@ func (of *OSFile) WriteAt(b []byte, off int64) (n int, err error) {
 }
 
 func (of *OSFile) Truncate(size int64) error {
-	return of.fd.Truncate(of.Size() + size)
+	err := of.fd.Truncate(of.size + size)
+	if err != nil {
+		return err
+	}
+	of.size += size
+	return nil
 }
 
 func (of *OSFile) Size() int64 {
-	stat, _ := of.fd.Stat()
-	return stat.Size()
+	return of.size
 }
 
 func (of *OSFile) Sync() error {

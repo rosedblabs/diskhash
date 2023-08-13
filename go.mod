@@ -5,7 +5,6 @@ go 1.19
 require (
 	github.com/spaolacci/murmur3 v1.1.0
 	github.com/stretchr/testify v1.8.4
-	github.com/valyala/bytebufferpool v1.0.0
 )
 
 require (

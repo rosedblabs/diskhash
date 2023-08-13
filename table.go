@@ -1,7 +1,7 @@
 package diskhash
 
 import (
-	"encoding/gob"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	primaryFileName  = "HASH.PRIMARY"
-	overflowFileName = "HASH.OVERFLOW"
-	metaFileName     = "HASH.META"
+	primaryFileName     = "HASH.PRIMARY"
+	overflowFileName    = "HASH.OVERFLOW"
+	metaFileName        = "HASH.META"
+	bucketNextOffsetLen = 8
 )
 
 type MatchKeyFunc func(Slot) (bool, error)
@@ -52,17 +53,17 @@ func Open(options Options) (*Table, error) {
 		}
 	}
 
-	// open and read metadata info
+	// open meta file and read metadata info
 	if err := t.readMeta(); err != nil {
 		return nil, err
 	}
 
 	// open and init primary file
-	primaryFile, err := openFile(filepath.Join(options.DirPath, primaryFileName), t.meta.BucketSize)
+	primaryFile, err := t.openFile(primaryFileName)
 	if err != nil {
 		return nil, err
 	}
-	// init first bucket
+	// init first bucket if the primary file is empty
 	if primaryFile.Size() == int64(t.meta.BucketSize) {
 		if err := primaryFile.Truncate(int64(t.meta.BucketSize)); err != nil {
 			_ = primaryFile.Close()
@@ -72,7 +73,7 @@ func Open(options Options) (*Table, error) {
 	t.primaryFile = primaryFile
 
 	// open overflow file
-	overflowFile, err := openFile(filepath.Join(options.DirPath, overflowFileName), t.meta.BucketSize)
+	overflowFile, err := t.openFile(overflowFileName)
 	if err != nil {
 		return nil, err
 	}
@@ -92,13 +93,15 @@ func (t *Table) readMeta() error {
 			NumBuckets:      1,
 			SlotValueLength: t.options.SlotValueLength,
 		}
-		t.meta.BucketSize = slotsPerBucket*(4+t.meta.SlotValueLength) + 8
+		t.meta.BucketSize = slotsPerBucket*(4+t.meta.SlotValueLength) + bucketNextOffsetLen
 		t.metaFile = file
 	} else {
-		decoder := gob.NewDecoder(t.metaFile)
+		decoder := json.NewDecoder(t.metaFile)
 		if err := decoder.Decode(t.meta); err != nil {
 			return err
 		}
+		// we require that the slot value length must be equal to the length specified in the options,
+		// once the slot value length is set, it cannot be changed.
 		if t.meta.SlotValueLength != t.options.SlotValueLength {
 			return errors.New("slot value length mismatch")
 		}
@@ -108,7 +111,7 @@ func (t *Table) readMeta() error {
 }
 
 func (t *Table) writeMeta() error {
-	encoder := gob.NewEncoder(t.metaFile)
+	encoder := json.NewEncoder(t.metaFile)
 	return encoder.Encode(t.meta)
 }
 
@@ -132,7 +135,7 @@ func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 
 	// the value length must be equal to the length specified in the options
 	if len(value) != int(t.meta.SlotValueLength) {
-		return errors.New("invalid slot value length")
+		return errors.New("value length must be equal to the length specified in the options")
 	}
 
 	// get the slot writer to write the new slot,
@@ -185,7 +188,7 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 		}
 
 		sw.currentBucket = b
-		// iterate all slots in the bucket, find the existing or empty slot
+		// iterate all slots in current bucket, find the existing or empty slot
 		for i, slot := range b.slots {
 			// find an empty slot to insert
 			if slot.Hash == 0 {
@@ -205,7 +208,8 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 				return sw, nil
 			}
 		}
-		// no empty slot in the bucket, will create an overflow bucket
+		// no empty slot in the bucket and its all overflow buckets,
+		// create a new overflow bucket.
 		if b.nextOffset == 0 {
 			sw.currentSlotIndex = slotsPerBucket
 			return sw, nil
@@ -245,8 +249,43 @@ func (t *Table) Get(key []byte, matchKey MatchKeyFunc) error {
 	}
 }
 
-func (t *Table) Delete() error {
-	return nil
+func (t *Table) Delete(key []byte, matchKey MatchKeyFunc) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	keyHash := getKeyHash(key)
+	bi := t.newBucketIterator(t.getKeyBucket(keyHash))
+	for {
+		b, err := bi.next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		for i, slot := range b.slots {
+			if slot.Hash == 0 {
+				break
+			}
+			if slot.Hash != keyHash {
+				continue
+			}
+			match, err := matchKey(slot)
+			if err != nil {
+				return err
+			}
+			if !match {
+				continue
+			}
+			// now we find the slot to delete, remove it from the bucket
+			b.removeSlot(i)
+			if err := b.write(); err != nil {
+				return err
+			}
+			t.meta.NumKeys--
+			return nil
+		}
+	}
 }
 
 // get the hash value according to the key
@@ -263,14 +302,14 @@ func (t *Table) getKeyBucket(keyHash uint32) uint32 {
 	return bucketIndex
 }
 
-func openFile(name string, bucketSize uint32) (fs.File, error) {
-	file, err := fs.Open(name, fs.OSFileSystem)
+func (t *Table) openFile(name string) (fs.File, error) {
+	file, err := fs.Open(filepath.Join(t.options.DirPath, name), fs.OSFileSystem)
 	if err != nil {
 		return nil, err
 	}
 	// init file header
 	if file.Size() == 0 {
-		if err := file.Truncate(int64(bucketSize)); err != nil {
+		if err := file.Truncate(int64(t.meta.BucketSize)); err != nil {
 			_ = file.Close()
 			return nil, err
 		}
@@ -288,6 +327,7 @@ func (t *Table) split() error {
 		},
 	}
 
+	// create a new bucket
 	newSlotWriter := &slotWriter{
 		currentBucket: &bucket{
 			file:       t.primaryFile,
@@ -305,6 +345,8 @@ func (t *Table) split() error {
 		t.meta.SplitBucketIndex = 0
 	}
 
+	// iterate all slots in the split bucket and the overflow buckets,
+	// rewrite all slots.
 	var freeBuckets []int64
 	bi := t.newBucketIterator(splitBucketIndex)
 	for {
@@ -329,6 +371,8 @@ func (t *Table) split() error {
 				return insertErr
 			}
 		}
+		// if the splitBucket has overflow buckets, and these buckets are no longer used,
+		// because all slots has been rewritten, so we can free these buckets.
 		if b.nextOffset != 0 {
 			freeBuckets = append(freeBuckets, b.nextOffset)
 		}
@@ -339,6 +383,7 @@ func (t *Table) split() error {
 		t.meta.FreeBuckets = append(t.meta.FreeBuckets, freeBuckets...)
 	}
 
+	// write all slots to the file
 	if err := splitSlotWriter.writeSlots(); err != nil {
 		return err
 	}
@@ -362,6 +407,7 @@ func (t *Table) createOverflowBucket() (*bucket, error) {
 			return nil, err
 		}
 	}
+
 	return &bucket{
 		file:       t.overflowFile,
 		offset:     offset,
