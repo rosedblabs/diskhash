@@ -2,31 +2,39 @@ package benchmark
 
 import (
 	"fmt"
-	"github.com/rosedblabs/diskhash"
-	"github.com/stretchr/testify/assert"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/rosedblabs/diskhash"
+	"github.com/stretchr/testify/assert"
 )
 
-var t *diskhash.Table
-
-func init() {
+func newDB() (*diskhash.Table, func()) {
 	options := diskhash.DefaultOptions
 	options.SlotValueLength = 16
 	options.DirPath = "/tmp/diskhash-bench"
-	var err error
-	t, err = diskhash.Open(options)
+	db, err := diskhash.Open(options)
 	if err != nil {
 		panic(err)
+	}
+
+	return db, func() {
+		_ = db.Close()
+		_ = os.RemoveAll(options.DirPath)
 	}
 }
 
 func BenchmarkPut(b *testing.B) {
+	db, closer := newDB()
+	defer closer()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 
+	value := []byte(strings.Repeat("d", 16))
 	for i := 0; i < b.N; i++ {
-		err := t.Put(GetTestKey(i), []byte(strings.Repeat("d", 16)), func(slot diskhash.Slot) (bool, error) {
+		err := db.Put(GetTestKey(i), value, func(slot diskhash.Slot) (bool, error) {
 			return false, nil
 		})
 		assert.Nil(b, err)
