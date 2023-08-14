@@ -35,16 +35,16 @@ func TestOpen(t *testing.T) {
 
 func TestTable_Put(t *testing.T) {
 	t.Run("16B-1000000", func(t *testing.T) {
-		testTablePutOrGet(t, 16, 10000000, false)
+		testTablePutOrGet(t, 16, 1000000, false)
 	})
-	t.Run("20B-200000", func(t *testing.T) {
-		testTablePutOrGet(t, 16, 2000000, false)
+	t.Run("20B-100000", func(t *testing.T) {
+		testTablePutOrGet(t, 16, 1000000, false)
 	})
 	t.Run("1K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 1024, 500000, false)
+		testTablePutOrGet(t, 1024, 50000, false)
 	})
 	t.Run("4K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 4*1024, 500000, false)
+		testTablePutOrGet(t, 4*1024, 50000, false)
 	})
 }
 
@@ -52,19 +52,23 @@ func TestTable_Get(t *testing.T) {
 	t.Run("16B-1000000", func(t *testing.T) {
 		testTablePutOrGet(t, 16, 1000000, true)
 	})
-	t.Run("20B-200000", func(t *testing.T) {
-		testTablePutOrGet(t, 16, 2000000, true)
+	t.Run("20B-1000000", func(t *testing.T) {
+		testTablePutOrGet(t, 16, 1000000, true)
 	})
 	t.Run("1K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 1024, 500000, true)
+		testTablePutOrGet(t, 1024, 50000, true)
 	})
 	t.Run("4K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 4*1024, 500000, true)
+		testTablePutOrGet(t, 4*1024, 50000, true)
 	})
 }
 
 func testTablePutOrGet(t *testing.T, valueLen uint32, count int, needGet bool) {
-	dir, err := os.MkdirTemp("", "diskhash-test-put")
+	name := "put"
+	if needGet {
+		name = "get"
+	}
+	dir, err := os.MkdirTemp("", "diskhash-test-"+name)
 	assert.Nil(t, err)
 
 	options := DefaultOptions
