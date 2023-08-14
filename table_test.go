@@ -2,10 +2,11 @@ package diskhash
 
 import (
 	"fmt"
-	"github.com/stretchr/testify/assert"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func destroyTable(t *Table) {
@@ -59,9 +60,63 @@ func testTablePut(t *testing.T, valueLen uint32, count int) {
 	defer destroyTable(table)
 
 	for i := 0; i < count; i++ {
-		err = table.Put(GetTestKey(i), []byte(strings.Repeat("D", int(valueLen))), func(slot Slot) (bool, error) {
+		key := GetTestKey(i)
+		value := []byte(strings.Repeat("D", int(valueLen)))
+
+		err = table.Put(key, value, func(slot Slot) (bool, error) {
 			return false, nil
 		})
+
+		assert.Nil(t, err)
+	}
+}
+
+func TestTableCrud(t *testing.T) {
+	dir, err := os.MkdirTemp("", "diskhash-test-crud")
+	assert.Nil(t, err)
+
+	options := DefaultOptions
+	options.DirPath = dir
+	options.SlotValueLength = 32
+	table, err := Open(options)
+	assert.Nil(t, err)
+	defer destroyTable(table)
+
+	for i := 0; i < 100; i++ {
+		var cur []byte
+
+		getFunc := func(slot Slot) (bool, error) {
+			cur = slot.Value
+			return false, nil
+		}
+		updateFunc := func(slot Slot) (bool, error) {
+			return false, nil
+		}
+
+		key := GetTestKey(i)
+		value := []byte(strings.Repeat("D", 32))
+
+		// put
+		err = table.Put(key, value, updateFunc)
+		assert.Nil(t, err)
+
+		// get
+		err = table.Get(key, getFunc)
+		assert.Nil(t, err)
+		assert.Equal(t, value, cur)
+
+		// put different value
+		value = []byte(strings.Repeat("A", 32))
+		err = table.Put(key, value, updateFunc)
+		assert.Nil(t, err)
+
+		// get after put different value
+		err = table.Get(key, getFunc)
+		assert.Nil(t, err)
+		assert.Equal(t, value, cur)
+
+		// delete
+		err = table.Delete(key, updateFunc)
 		assert.Nil(t, err)
 	}
 }
