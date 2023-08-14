@@ -35,40 +35,66 @@ func TestOpen(t *testing.T) {
 
 func TestTable_Put(t *testing.T) {
 	t.Run("16B-1000000", func(t *testing.T) {
-		testTablePutOrGet(t, 16, 1000000, false)
+		testTableBaisc(t, 16, 1000000, false, false, false)
 	})
 	t.Run("20B-100000", func(t *testing.T) {
-		testTablePutOrGet(t, 16, 1000000, false)
+		testTableBaisc(t, 16, 1000000, false, false, false)
 	})
 	t.Run("1K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 1024, 50000, false)
+		testTableBaisc(t, 1024, 50000, false, false, false)
 	})
 	t.Run("4K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 4*1024, 50000, false)
+		testTableBaisc(t, 4*1024, 50000, false, false, false)
 	})
 }
 
 func TestTable_Get(t *testing.T) {
 	t.Run("16B-1000000", func(t *testing.T) {
-		testTablePutOrGet(t, 16, 1000000, true)
+		testTableBaisc(t, 16, 1000000, true, false, false)
 	})
 	t.Run("20B-1000000", func(t *testing.T) {
-		testTablePutOrGet(t, 16, 1000000, true)
+		testTableBaisc(t, 16, 1000000, true, false, false)
 	})
 	t.Run("1K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 1024, 50000, true)
+		testTableBaisc(t, 1024, 50000, true, false, false)
 	})
 	t.Run("4K-50000", func(t *testing.T) {
-		testTablePutOrGet(t, 4*1024, 50000, true)
+		testTableBaisc(t, 4*1024, 50000, true, false, false)
 	})
 }
 
-func testTablePutOrGet(t *testing.T, valueLen uint32, count int, needGet bool) {
-	name := "put"
-	if needGet {
-		name = "get"
-	}
-	dir, err := os.MkdirTemp("", "diskhash-test-"+name)
+func TestTable_Delete(t *testing.T) {
+	t.Run("16B-1000000", func(t *testing.T) {
+		testTableBaisc(t, 16, 1000000, false, true, false)
+	})
+	t.Run("20B-1000000", func(t *testing.T) {
+		testTableBaisc(t, 16, 1000000, false, true, false)
+	})
+	t.Run("1K-50000", func(t *testing.T) {
+		testTableBaisc(t, 1024, 50000, false, true, false)
+	})
+	t.Run("4K-50000", func(t *testing.T) {
+		testTableBaisc(t, 4*1024, 50000, false, true, false)
+	})
+}
+
+func TestTable_Update(t *testing.T) {
+	t.Run("16B-1000000", func(t *testing.T) {
+		testTableBaisc(t, 16, 1000000, false, false, true)
+	})
+	t.Run("20B-1000000", func(t *testing.T) {
+		testTableBaisc(t, 16, 1000000, false, false, true)
+	})
+	t.Run("1K-50000", func(t *testing.T) {
+		testTableBaisc(t, 1024, 50000, false, false, true)
+	})
+	t.Run("4K-50000", func(t *testing.T) {
+		testTableBaisc(t, 4*1024, 50000, false, false, true)
+	})
+}
+
+func testTableBaisc(t *testing.T, valueLen uint32, count int, needGet, needDelete, needUpdate bool) {
+	dir, err := os.MkdirTemp("", "diskhash-test")
 	assert.Nil(t, err)
 
 	options := DefaultOptions
@@ -87,7 +113,7 @@ func testTablePutOrGet(t *testing.T, valueLen uint32, count int, needGet bool) {
 		assert.Nil(t, err)
 	}
 
-	if needGet {
+	getValue := func(target []byte) {
 		for i := 0; i < count; i++ {
 			key := GetTestKey(i)
 			var res []byte
@@ -100,9 +126,44 @@ func testTablePutOrGet(t *testing.T, valueLen uint32, count int, needGet bool) {
 				return false, nil
 			}
 			err := table.Get(key, matchKey)
-			assert.Equal(t, value, res)
+			assert.Equal(t, target, res)
 			assert.Nil(t, err)
 		}
+	}
+
+	if needGet {
+		getValue(value)
+	}
+
+	if needDelete {
+		for i := 0; i < count; i++ {
+			key := GetTestKey(i)
+			matchKey := func(slot Slot) (bool, error) {
+				if getKeyHash(key) == slot.Hash {
+					return true, nil
+				}
+				return false, nil
+			}
+			err := table.Delete(key, matchKey)
+			assert.Nil(t, err)
+		}
+		getValue(nil)
+	}
+
+	if needUpdate {
+		newValue := []byte(strings.Repeat("H", int(valueLen)))
+		for i := 0; i < count; i++ {
+			key := GetTestKey(i)
+			matchKey := func(slot Slot) (bool, error) {
+				if getKeyHash(key) == slot.Hash {
+					return true, nil
+				}
+				return false, nil
+			}
+			err := table.Put(key, newValue, matchKey)
+			assert.Nil(t, err)
+		}
+		getValue(newValue)
 	}
 }
 
