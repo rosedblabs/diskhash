@@ -26,8 +26,8 @@ func newDB() (*diskhash.Table, func()) {
 }
 
 func BenchmarkPut(b *testing.B) {
-	db, closer := newDB()
-	defer closer()
+	db, destroy := newDB()
+	defer destroy()
 
 	b.ResetTimer()
 	b.ReportAllocs()

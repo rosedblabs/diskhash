@@ -34,21 +34,36 @@ func TestOpen(t *testing.T) {
 }
 
 func TestTable_Put(t *testing.T) {
-	t.Run("16B-10000000", func(t *testing.T) {
-		testTablePut(t, 16, 10000000)
+	t.Run("16B-1000000", func(t *testing.T) {
+		testTablePutOrGet(t, 16, 10000000, false)
 	})
-	t.Run("20B-2000000", func(t *testing.T) {
-		testTablePut(t, 16, 2000000)
+	t.Run("20B-200000", func(t *testing.T) {
+		testTablePutOrGet(t, 16, 2000000, false)
 	})
-	t.Run("1K-500000", func(t *testing.T) {
-		testTablePut(t, 1024, 500000)
+	t.Run("1K-50000", func(t *testing.T) {
+		testTablePutOrGet(t, 1024, 500000, false)
 	})
-	t.Run("4K-500000", func(t *testing.T) {
-		testTablePut(t, 4*1024, 500000)
+	t.Run("4K-50000", func(t *testing.T) {
+		testTablePutOrGet(t, 4*1024, 500000, false)
 	})
 }
 
-func testTablePut(t *testing.T, valueLen uint32, count int) {
+func TestTable_Get(t *testing.T) {
+	t.Run("16B-1000000", func(t *testing.T) {
+		testTablePutOrGet(t, 16, 1000000, true)
+	})
+	t.Run("20B-200000", func(t *testing.T) {
+		testTablePutOrGet(t, 16, 2000000, true)
+	})
+	t.Run("1K-50000", func(t *testing.T) {
+		testTablePutOrGet(t, 1024, 500000, true)
+	})
+	t.Run("4K-50000", func(t *testing.T) {
+		testTablePutOrGet(t, 4*1024, 500000, true)
+	})
+}
+
+func testTablePutOrGet(t *testing.T, valueLen uint32, count int, needGet bool) {
 	dir, err := os.MkdirTemp("", "diskhash-test-put")
 	assert.Nil(t, err)
 
@@ -59,19 +74,35 @@ func testTablePut(t *testing.T, valueLen uint32, count int) {
 	assert.Nil(t, err)
 	defer destroyTable(table)
 
+	value := []byte(strings.Repeat("D", int(valueLen)))
 	for i := 0; i < count; i++ {
 		key := GetTestKey(i)
-		value := []byte(strings.Repeat("D", int(valueLen)))
-
 		err = table.Put(key, value, func(slot Slot) (bool, error) {
 			return false, nil
 		})
-
 		assert.Nil(t, err)
+	}
+
+	if needGet {
+		for i := 0; i < count; i++ {
+			key := GetTestKey(i)
+			var res []byte
+			matchKey := func(slot Slot) (bool, error) {
+				if getKeyHash(key) == slot.Hash {
+					res = make([]byte, len(slot.Value))
+					copy(res, slot.Value)
+					return true, nil
+				}
+				return false, nil
+			}
+			err := table.Get(key, matchKey)
+			assert.Equal(t, value, res)
+			assert.Nil(t, err)
+		}
 	}
 }
 
-func TestTableCrud(t *testing.T) {
+func TestTableCRUD(t *testing.T) {
 	dir, err := os.MkdirTemp("", "diskhash-test-crud")
 	assert.Nil(t, err)
 

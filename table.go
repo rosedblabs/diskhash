@@ -225,7 +225,7 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 				return sw, nil
 			}
 		}
-		// no empty slot in the bucket and its all overflow buckets,
+		// no empty slot in the bucket and it's all overflow buckets,
 		// create a new overflow bucket.
 		if b.nextOffset == 0 {
 			sw.currentSlotIndex = slotsPerBucket
