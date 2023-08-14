@@ -32,8 +32,9 @@ func BenchmarkPut(b *testing.B) {
 	b.ResetTimer()
 	b.ReportAllocs()
 
+	value := []byte(strings.Repeat("d", 16))
 	for i := 0; i < b.N; i++ {
-		err := db.Put(GetTestKey(i), []byte(strings.Repeat("d", 16)), func(slot diskhash.Slot) (bool, error) {
+		err := db.Put(GetTestKey(i), value, func(slot diskhash.Slot) (bool, error) {
 			return false, nil
 		})
 		assert.Nil(b, err)
