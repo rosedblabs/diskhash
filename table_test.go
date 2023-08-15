@@ -136,6 +136,7 @@ func testTableBaisc(t *testing.T, valueLen uint32, count int, needGet, needDelet
 	}
 
 	if needDelete {
+		assert.Equal(t, uint32(count), table.Size())
 		for i := 0; i < count; i++ {
 			key := GetTestKey(i)
 			matchKey := func(slot Slot) (bool, error) {
@@ -147,10 +148,12 @@ func testTableBaisc(t *testing.T, valueLen uint32, count int, needGet, needDelet
 			err := table.Delete(key, matchKey)
 			assert.Nil(t, err)
 		}
+		assert.Equal(t, uint32(0), table.Size())
 		getValue(nil)
 	}
 
 	if needUpdate {
+		assert.Equal(t, uint32(count), table.Size())
 		newValue := []byte(strings.Repeat("H", int(valueLen)))
 		for i := 0; i < count; i++ {
 			key := GetTestKey(i)
@@ -164,6 +167,7 @@ func testTableBaisc(t *testing.T, valueLen uint32, count int, needGet, needDelet
 			assert.Nil(t, err)
 		}
 		getValue(newValue)
+		assert.Equal(t, uint32(count), table.Size())
 	}
 }
 

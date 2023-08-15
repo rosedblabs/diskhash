@@ -2,8 +2,9 @@ package diskhash
 
 import (
 	"encoding/binary"
-	"github.com/rosedblabs/diskhash/fs"
 	"io"
+
+	"github.com/rosedblabs/diskhash/fs"
 )
 
 const slotsPerBucket = 31
@@ -124,19 +125,21 @@ func (sw *slotWriter) writeSlots() error {
 
 func (b *bucket) write() error {
 	buf := make([]byte, b.bucketSize)
-	data := buf
 	// write all slots to the buffer
+	var index = 0
 	for i := 0; i < slotsPerBucket; i++ {
 		slot := b.slots[i]
-		binary.LittleEndian.PutUint32(buf[:4], slot.Hash)
-		copy(buf[4:4+len(slot.Value)], slot.Value)
 
-		buf = buf[4+len(slot.Value):]
+		binary.LittleEndian.PutUint32(buf[index:index+4], slot.Hash)
+		copy(buf[index+4:index+4+len(slot.Value)], slot.Value)
+
+		index += 4 + len(slot.Value)
 	}
-	// write the offset of next overflow bucket
-	binary.LittleEndian.PutUint64(buf[:8], uint64(b.nextOffset))
 
-	_, err := b.file.WriteAt(data, b.offset)
+	// write the offset of next overflow bucket
+	binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(b.nextOffset))
+
+	_, err := b.file.WriteAt(buf, b.offset)
 	return err
 }
 

@@ -305,6 +305,12 @@ func (t *Table) Delete(key []byte, matchKey MatchKeyFunc) error {
 	}
 }
 
+func (t *Table) Size() uint32 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.meta.NumKeys
+}
+
 // get the hash value according to the key
 func getKeyHash(key []byte) uint32 {
 	return murmur3.Sum32(key)
