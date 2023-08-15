@@ -25,12 +25,20 @@ func TestOpen(t *testing.T) {
 	options := DefaultOptions
 	options.DirPath = dir
 	options.SlotValueLength = 10
+
 	table, err := Open(options)
 	assert.Nil(t, err)
-	defer destroyTable(table)
 
-	err = table.Close()
+	// if table is already open, reopening table raise error
+	_, err = Open(options)
+	assert.Equal(t, ErrDatabaseIsUsing, err)
+
+	destroyTable(table)
+
+	// after close table, open table again
+	table, err = Open(options)
 	assert.Nil(t, err)
+	destroyTable(table)
 }
 
 func TestTable_Put(t *testing.T) {

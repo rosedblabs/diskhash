@@ -8,15 +8,21 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/gofrs/flock"
 	"github.com/rosedblabs/diskhash/fs"
 	"github.com/spaolacci/murmur3"
 )
 
 const (
+	fileLockName        = "HASH.FLOCK"
 	primaryFileName     = "HASH.PRIMARY"
 	overflowFileName    = "HASH.OVERFLOW"
 	metaFileName        = "HASH.META"
 	bucketNextOffsetLen = 8
+)
+
+var (
+	ErrDatabaseIsUsing = errors.New("the database directory is used by another process")
 )
 
 type MatchKeyFunc func(Slot) (bool, error)
@@ -27,6 +33,7 @@ type Table struct {
 	metaFile     fs.File
 	meta         *tableMeta
 	mu           *sync.RWMutex
+	fileLock     *flock.Flock
 	options      Options
 }
 
@@ -55,6 +62,16 @@ func Open(options Options) (*Table, error) {
 		if err := os.MkdirAll(options.DirPath, os.ModePerm); err != nil {
 			return nil, err
 		}
+	}
+
+	// create file lock, prevent multiple processes from using the same database directory
+	t.fileLock = flock.New(filepath.Join(options.DirPath, fileLockName))
+	hold, err := t.fileLock.TryLock()
+	if err != nil {
+		return nil, err
+	}
+	if !hold {
+		return nil, ErrDatabaseIsUsing
 	}
 
 	// open meta file and read metadata info
@@ -136,13 +153,19 @@ func (t *Table) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// flush metadata to disk
 	if err := t.writeMeta(); err != nil {
 		return err
 	}
 
+	// close files
 	_ = t.primaryFile.Close()
 	_ = t.overflowFile.Close()
 	_ = t.metaFile.Close()
+
+	// release file lock
+	_ = t.fileLock.Unlock()
+
 	return nil
 }
 
