@@ -1,7 +1,6 @@
 package fs
 
 import (
-	"io"
 	"os"
 )
 
@@ -17,11 +16,11 @@ func openOSFile(name string) (File, error) {
 	}
 
 	// get the file size
-	size, err := fd.Seek(0, io.SeekEnd)
+	stat, err := fd.Stat()
 	if err != nil {
 		return nil, err
 	}
-	return &OSFile{fd: fd, size: size}, nil
+	return &OSFile{fd: fd, size: stat.Size()}, nil
 }
 
 func (of *OSFile) Read(p []byte) (n int, err error) {

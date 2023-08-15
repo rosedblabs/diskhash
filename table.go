@@ -100,18 +100,18 @@ func checkOptions(options Options) error {
 }
 
 func (t *Table) readMeta() error {
+	file, err := fs.Open(filepath.Join(t.options.DirPath, metaFileName), fs.OSFileSystem)
+	if err != nil {
+		return err
+	}
+	t.metaFile = file
+	t.meta = &tableMeta{}
+
 	// init meta file if not exist
-	if t.metaFile == nil {
-		file, err := fs.Open(filepath.Join(t.options.DirPath, metaFileName), fs.OSFileSystem)
-		if err != nil {
-			return err
-		}
-		t.meta = &tableMeta{
-			NumBuckets:      1,
-			SlotValueLength: t.options.SlotValueLength,
-		}
+	if file.Size() == 0 {
+		t.meta.NumBuckets = 1
+		t.meta.SlotValueLength = t.options.SlotValueLength
 		t.meta.BucketSize = slotsPerBucket*(4+t.meta.SlotValueLength) + bucketNextOffsetLen
-		t.metaFile = file
 	} else {
 		decoder := json.NewDecoder(t.metaFile)
 		if err := decoder.Decode(t.meta); err != nil {
