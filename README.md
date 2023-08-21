@@ -56,8 +56,8 @@ import (
 )
 
 func main() {
-    	// open the table, specify the slot value length,
-    	// remember that you can't change it once you set it, and all values must be the same length.
+	// open the table, specify the slot value length,
+	// remember that you can't change it once you set it, and all values must be the same length.
 	options := diskhash.DefaultOptions
 	options.DirPath = "/tmp/diskhash-test"
 	options.SlotValueLength = 10
@@ -66,17 +66,17 @@ func main() {
 		panic(err)
 	}
 
-    	// don't forget to close the table!!!
-    	// some meta info will be saved when you close the table.
+	// don't forget to close the table!!!
+	// some meta info will be saved when you close the table.
 	defer func() {
 		_ = table.Close()
 	}()
 
-		// put a key-value pair into the table.
-		// the MatchKey function will be called when the key is matched.
-		// Why we need the MatchKey function?
-		// because the key may be hashed to the same slot with another key(even though the probability is very low),
-		// so we need to check if the key is matched.
+	// put a key-value pair into the table.
+	// the MatchKey function will be called when the key is matched.
+	// Why we need the MatchKey function?
+	// because the key may be hashed to the same slot with another key(even though the probability is very low),
+	// so we need to check if the key is matched.
 	err = table.Put([]byte("key1"), []byte(strings.Repeat("v", 10)), func(slot diskhash.Slot) (bool, error) {
 		return true, nil
 	})
