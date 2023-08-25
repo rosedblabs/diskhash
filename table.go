@@ -146,6 +146,21 @@ func (t *Table) Close() error {
 	return nil
 }
 
+func (t *Table) Sync() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if err := t.primaryFile.Sync(); err != nil {
+		return err
+	}
+
+	if err := t.overflowFile.Sync(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
