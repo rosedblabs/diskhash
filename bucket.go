@@ -7,16 +7,17 @@ import (
 	"github.com/rosedblabs/diskhash/fs"
 )
 
-const slotsPerBucket = 31
-
+// bucket is the basic unit of a file in diskhash.
+// each file contains 31 slots at most.
 type bucket struct {
-	slots      [slotsPerBucket]Slot
-	offset     int64
-	nextOffset int64
-	file       fs.File
+	slots      [slotsPerBucket]Slot // 31 slots now
+	offset     int64                // the offset of the bucket in the file
+	nextOffset int64                // the offset of the next overflow bucket
+	file       fs.File              // the file that contains the bucket
 	bucketSize uint32
 }
 
+// bucketIterator is used to iterate all buckets in hash table.
 type bucketIterator struct {
 	currentFile  fs.File
 	overflowFile fs.File
@@ -26,9 +27,11 @@ type bucketIterator struct {
 	bucketSize   uint32
 }
 
+// Slot is the basic unit of a bucket.
+// each slot contains a key hash and a value.
 type Slot struct {
-	Hash  uint32
-	Value []byte
+	Hash  uint32 // the hash of the key
+	Value []byte // raw value
 }
 
 type slotWriter struct {
@@ -71,6 +74,7 @@ func (bi *bucketIterator) next() (*bucket, error) {
 	return bucket, nil
 }
 
+// readBucket reads a bucket from the current file.
 func (bi *bucketIterator) readBucket() (*bucket, error) {
 	// read an entire bucket with all slots
 	bucketBuf := make([]byte, bi.bucketSize)
@@ -81,22 +85,22 @@ func (bi *bucketIterator) readBucket() (*bucket, error) {
 	b := &bucket{file: bi.currentFile, offset: bi.offset, bucketSize: bi.bucketSize}
 	// parse and get slots in the bucket
 	for i := 0; i < slotsPerBucket; i++ {
-		_ = bucketBuf[4+bi.slotValueLen]
-		b.slots[i].Hash = binary.LittleEndian.Uint32(bucketBuf[:4])
+		_ = bucketBuf[hashLen+bi.slotValueLen]
+		b.slots[i].Hash = binary.LittleEndian.Uint32(bucketBuf[:hashLen])
 		if b.slots[i].Hash != 0 {
-			b.slots[i].Value = bucketBuf[4 : 4+bi.slotValueLen]
+			b.slots[i].Value = bucketBuf[hashLen : hashLen+bi.slotValueLen]
 		}
-		bucketBuf = bucketBuf[4+bi.slotValueLen:]
+		bucketBuf = bucketBuf[hashLen+bi.slotValueLen:]
 	}
 
 	// the last 8 bytes is the offset of next overflow bucket
-	b.nextOffset = int64(binary.LittleEndian.Uint64(bucketBuf[:8]))
+	b.nextOffset = int64(binary.LittleEndian.Uint64(bucketBuf[:nextOffLen]))
 
 	return b, nil
 }
 
 func (sw *slotWriter) insertSlot(sl Slot, t *Table) error {
-	// if we exeed the slotsPerBucket, we need to create a new overflow bucket
+	// if we exceed the slotsPerBucket, we need to create a new overflow bucket
 	// and link it to the current bucket
 	if sw.currentSlotIndex == slotsPerBucket {
 		nextBucket, err := t.createOverflowBucket()
@@ -123,6 +127,7 @@ func (sw *slotWriter) writeSlots() error {
 	return sw.currentBucket.write()
 }
 
+// write all slots in the bucket to the file.
 func (b *bucket) write() error {
 	buf := make([]byte, b.bucketSize)
 	// write all slots to the buffer
@@ -130,19 +135,21 @@ func (b *bucket) write() error {
 	for i := 0; i < slotsPerBucket; i++ {
 		slot := b.slots[i]
 
-		binary.LittleEndian.PutUint32(buf[index:index+4], slot.Hash)
-		copy(buf[index+4:index+4+len(slot.Value)], slot.Value)
+		binary.LittleEndian.PutUint32(buf[index:index+hashLen], slot.Hash)
+		copy(buf[index+hashLen:index+hashLen+len(slot.Value)], slot.Value)
 
-		index += 4 + len(slot.Value)
+		index += hashLen + len(slot.Value)
 	}
 
 	// write the offset of next overflow bucket
-	binary.LittleEndian.PutUint64(buf[len(buf)-8:], uint64(b.nextOffset))
+	binary.LittleEndian.PutUint64(buf[len(buf)-nextOffLen:], uint64(b.nextOffset))
 
 	_, err := b.file.WriteAt(buf, b.offset)
 	return err
 }
 
+// remove a slot from the bucket, and move all slots after it forward
+// to fill the empty slot.
 func (b *bucket) removeSlot(slotIndex int) {
 	i := slotIndex
 	for ; i < slotsPerBucket-1; i++ {

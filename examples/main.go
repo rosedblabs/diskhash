@@ -26,8 +26,10 @@ func main() {
 	// put a key-value pair into the table.
 	// the MatchKey function will be called when the key is matched.
 	// Why we need the MatchKey function?
-	// because the key may be hashed to the same slot with another key(even though the probability is very low),
-	// so we need to check if the key is matched.
+	// When we store the data in the hash table, we only store the hash value of the key, and the raw value.
+	// So when we get the data from hash table, even if the hash value of the key matches, that doesn't mean
+	// the key matches because of hash collision.
+	// So we need to provide a function to determine whether the key of the slot matches the stored key.
 	err = table.Put([]byte("key1"), []byte(strings.Repeat("v", 10)), func(slot diskhash.Slot) (bool, error) {
 		return true, nil
 	})

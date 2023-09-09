@@ -13,23 +13,38 @@ import (
 )
 
 const (
-	primaryFileName     = "HASH.PRIMARY"
-	overflowFileName    = "HASH.OVERFLOW"
-	metaFileName        = "HASH.META"
-	bucketNextOffsetLen = 8
+	primaryFileName  = "HASH.PRIMARY"
+	overflowFileName = "HASH.OVERFLOW"
+	metaFileName     = "HASH.META"
+	slotsPerBucket   = 31
+	nextOffLen       = 8
+	hashLen          = 4
 )
 
+// MatchKeyFunc is used to determine whether the key of the slot matches the stored key.
+// And you must supply the function to the Put/Get/Delete methods.
+//
+// Why we need this function?
+//
+// When we store the data in the hash table, we only store the hash value of the key, and the raw value.
+// So when we get the data from hash table, even if the hash value of the key matches, that doesn't mean
+// the key matches because of hash collision.
+// So we need to provide a function to determine whether the key of the slot matches the stored key.
 type MatchKeyFunc func(Slot) (bool, error)
 
+// Table is a hash table that stores data on disk.
+// It consists of two files, the primary file and the overflow file.
+// Each file is divided into multiple buckets, each bucket contains multiple slots.
 type Table struct {
 	primaryFile  fs.File
 	overflowFile fs.File
-	metaFile     fs.File
+	metaFile     fs.File // meta file stores the metadata of the hash table
 	meta         *tableMeta
-	mu           *sync.RWMutex
+	mu           *sync.RWMutex // protect the table when multiple goroutines access it
 	options      Options
 }
 
+// tableMeta is the metadata of the hash table.
 type tableMeta struct {
 	Level            uint8
 	SplitBucketIndex uint32
@@ -40,6 +55,9 @@ type tableMeta struct {
 	FreeBuckets      []int64
 }
 
+// Open opens a hash table.
+// If the hash table does not exist, it will be created automatically.
+// It will open the primary file, the overflow file and the meta file.
 func Open(options Options) (*Table, error) {
 	if err := checkOptions(options); err != nil {
 		return nil, err
@@ -99,6 +117,8 @@ func checkOptions(options Options) error {
 	return nil
 }
 
+// read the metadata info from the meta file.
+// if the file is empty, init the metadata info.
 func (t *Table) readMeta() error {
 	file, err := fs.Open(filepath.Join(t.options.DirPath, metaFileName), fs.OSFileSystem)
 	if err != nil {
@@ -111,7 +131,7 @@ func (t *Table) readMeta() error {
 	if file.Size() == 0 {
 		t.meta.NumBuckets = 1
 		t.meta.SlotValueLength = t.options.SlotValueLength
-		t.meta.BucketSize = slotsPerBucket*(4+t.meta.SlotValueLength) + bucketNextOffsetLen
+		t.meta.BucketSize = slotsPerBucket*(hashLen+t.meta.SlotValueLength) + nextOffLen
 	} else {
 		decoder := json.NewDecoder(t.metaFile)
 		if err := decoder.Decode(t.meta); err != nil {
@@ -127,11 +147,13 @@ func (t *Table) readMeta() error {
 	return nil
 }
 
+// write the metadata info to the meta file in json format.
 func (t *Table) writeMeta() error {
 	encoder := json.NewEncoder(t.metaFile)
 	return encoder.Encode(t.meta)
 }
 
+// Close closes the files of the hash table.
 func (t *Table) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -146,6 +168,7 @@ func (t *Table) Close() error {
 	return nil
 }
 
+// Sync flushes the data of the hash table to disk.
 func (t *Table) Sync() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -161,6 +184,8 @@ func (t *Table) Sync() error {
 	return nil
 }
 
+// Put puts a new ke/value pair to the hash table.
+// the parameter matchKey is described in the MatchKeyFunc.
 func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -173,7 +198,7 @@ func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	// get the slot writer to write the new slot,
 	// it will get the corresponding bucket according to the key hash,
 	// and find an empty slot to insert.
-	// If there are no empty slots, a overflow bucket will be created.
+	// If there are no empty slots, an overflow bucket will be created.
 	keyHash := getKeyHash(key)
 	slot := &Slot{Hash: keyHash, Value: value}
 	sw, err := t.getSlotWriter(slot.Hash, matchKey)
@@ -205,6 +230,8 @@ func (t *Table) Put(key, value []byte, matchKey MatchKeyFunc) error {
 	return nil
 }
 
+// find a free slot position to insert the new slot.
+// return the slot writer.
 func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWriter, error) {
 	sw := &slotWriter{}
 	bi := t.newBucketIterator(t.getKeyBucket(keyHash))
@@ -227,6 +254,8 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 				sw.currentSlotIndex = i
 				return sw, nil
 			}
+			// if the slot hash value is not equal to the key hash value,
+			// which means the key will never be matched, so we can skip it.
 			if slot.Hash != keyHash {
 				continue
 			}
@@ -249,6 +278,8 @@ func (t *Table) getSlotWriter(keyHash uint32, matchKey MatchKeyFunc) (*slotWrite
 	}
 }
 
+// Get gets the value of the key from the hash table.
+// the parameter matchKey is described in the MatchKeyFunc.
 func (t *Table) Get(key []byte, matchKey MatchKeyFunc) error {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -268,9 +299,15 @@ func (t *Table) Get(key []byte, matchKey MatchKeyFunc) error {
 			return err
 		}
 		for _, slot := range b.slots {
+			// if the slot hash value is 0, which means the subsequent slots are all empty,
+			// (why? when we write a new slot, we will iterate from the beginning of the bucket, find an empty slot to insert,
+			// when we remove a slot, we will move the subsequent slots forward, so all non-empty slots will be continuous)
+			// so we can skip the current bucket and move to the next bucket.
 			if slot.Hash == 0 {
 				break
 			}
+			// if the slot hash value is not equal to the key hash value,
+			// which means the key will never be matched, so we can skip it.
 			if slot.Hash != keyHash {
 				continue
 			}
@@ -281,12 +318,17 @@ func (t *Table) Get(key []byte, matchKey MatchKeyFunc) error {
 	}
 }
 
+// Delete deletes the key from the hash table.
+// the parameter matchKey is described in the MatchKeyFunc.
 func (t *Table) Delete(key []byte, matchKey MatchKeyFunc) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// get the bucket according to the key hash
 	keyHash := getKeyHash(key)
 	bi := t.newBucketIterator(t.getKeyBucket(keyHash))
+	// iterate all slots in the bucket and the overflow buckets,
+	// find the slot to delete.
 	for {
 		b, err := bi.next()
 		if err == io.EOF {
@@ -295,6 +337,8 @@ func (t *Table) Delete(key []byte, matchKey MatchKeyFunc) error {
 		if err != nil {
 			return err
 		}
+
+		// the following code is similar to the Get method
 		for i, slot := range b.slots {
 			if slot.Hash == 0 {
 				break
@@ -320,6 +364,7 @@ func (t *Table) Delete(key []byte, matchKey MatchKeyFunc) error {
 	}
 }
 
+// Size returns the number of keys in the hash table.
 func (t *Table) Size() uint32 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -345,7 +390,8 @@ func (t *Table) openFile(name string) (fs.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	// init file header
+	// init (dummy) file header
+	// the first bucket size in the file is not used, so we just init it.
 	if file.Size() == 0 {
 		if err := file.Truncate(int64(t.meta.BucketSize)); err != nil {
 			_ = file.Close()

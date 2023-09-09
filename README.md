@@ -1,14 +1,16 @@
 # diskhash
 on-disk hash table index(mainly for WAL).
 
-## When you will need it?
-if you are using [WAL](https://github.com/rosedblabs/wal) to store your data,
+## When will you need it?
+If you are using [WAL](https://github.com/rosedblabs/wal) to store your data,
 
 > wal: https://github.com/rosedblabs/wal
 
-you will get the positions to get the data from WAL, the common way to store the positions is to use an in-memory index, but if you have a large amount of data, the index will be very large, and it will take a lot of time to load the index into memory when you restart the program.
+you will get the positions to get the data from WAL, the common way to store the positions is to use an in-memory index(like rosedb).
 
-so, you can use diskhash to store the index on disk.
+But if you have a large amount of data, and it will take a lot of time to load the index into memory when you restart the system.
+
+So, you can use diskhash to store the index on disk.
 
 ## Can be used as a general hash table index(without wal)?
 
@@ -74,9 +76,10 @@ func main() {
 
 	// put a key-value pair into the table.
 	// the MatchKey function will be called when the key is matched.
-	// Why we need the MatchKey function?
-	// because the key may be hashed to the same slot with another key(even though the probability is very low),
-	// so we need to check if the key is matched.
+	// When we store the data in the hash table, we only store the hash value of the key, and the raw value.
+	// So when we get the data from hash table, even if the hash value of the key matches, that doesn't mean
+	// the key matches because of hash collision.
+	// So we need to provide a function to determine whether the key of the slot matches the stored key.
 	err = table.Put([]byte("key1"), []byte(strings.Repeat("v", 10)), func(slot diskhash.Slot) (bool, error) {
 		return true, nil
 	})
