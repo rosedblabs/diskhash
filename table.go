@@ -35,6 +35,11 @@ type MatchKeyFunc func(Slot) (bool, error)
 // Table is a hash table that stores data on disk.
 // It consists of two files, the primary file and the overflow file.
 // Each file is divided into multiple buckets, each bucket contains multiple slots.
+//
+// The overview design of the hash table is as the Linear Hashing algorithm.
+// See more:
+// https://en.wikipedia.org/wiki/Linear_hashing
+// https://dsf.berkeley.edu/jmh/cs186/f02/lecs/lec18_2up.pdf
 type Table struct {
 	primaryFile  fs.File
 	overflowFile fs.File
@@ -401,7 +406,10 @@ func (t *Table) openFile(name string) (fs.File, error) {
 	return file, nil
 }
 
+// split the current bucket.
+// it will create a new bucket, and rewrite all slots in the current bucket and the overflow buckets.
 func (t *Table) split() error {
+	// the bucket to be split
 	splitBucketIndex := t.meta.SplitBucketIndex
 	splitSlotWriter := &slotWriter{
 		currentBucket: &bucket{
@@ -423,7 +431,10 @@ func (t *Table) split() error {
 		return err
 	}
 
+	// increase the split bucket index
 	t.meta.SplitBucketIndex++
+	// if the split bucket index is equal to 1 << level,
+	// reset the split bucket index to 0, and increase the level.
 	if t.meta.SplitBucketIndex == 1<<t.meta.Level {
 		t.meta.Level++
 		t.meta.SplitBucketIndex = 0
@@ -479,6 +490,9 @@ func (t *Table) split() error {
 	return nil
 }
 
+// create overflow bucket.
+// If there are free buckets, it will reuse the free buckets.
+// Otherwise, it will create a new bucket in the overflow file.
 func (t *Table) createOverflowBucket() (*bucket, error) {
 	var offset int64
 	if len(t.meta.FreeBuckets) > 0 {
